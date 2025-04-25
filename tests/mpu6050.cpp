@@ -1,5 +1,5 @@
 // para usar esse codigo tem que ser no arduino IDE e tem que ter baixado as bibliotecas MPU6050 by eletronic cats e a biblioteca de compatibilidade do esp32 com o arduino IDE, além disso, o tipo de esp selecionado foi o "esp32 dev module"
-/*
+
 #include "I2Cdev.h"
 #define I2CDEV_IMPLEMENTATION I2CDEV_ARDUINO_WIRE
 #include <Wire.h>
@@ -562,4 +562,4 @@ void loop() {
 
     delay(10);  // 10ms delay gives approximately 100Hz update rate
 }
-  */
+  
