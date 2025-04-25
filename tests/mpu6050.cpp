@@ -5,49 +5,47 @@
 #include <Wire.h>
 #include "MPU6050_6Axis_MotionApps20.h"
 
-// Pin definitions for ESP32
+// entradas de I2C do acelerômetro no esp
 #define I2C_SDA 21
 #define I2C_SCL 22
 // Uncomment these when you add the hardware
 // #define BUZZER_PIN 5    // Pin for connecting a buzzer or alarm
 // #define LED_PIN 13      // Status LED pin
 
-// Declare global variables for filtering
+// variáveis utilizadas no filtro
 float filteredPitch = 0;
 float filteredRoll = 0;
 float filterFactor = 0.1; // Adjust between 0.01 (very smooth) and 0.5 (less filtering)
 
-// Fall detection parameters - optimized for real-world conditions
-#define FALL_THRESHOLD_ANGLE 40.0f      // Angle threshold for fall detection
-#define FALL_THRESHOLD_ACCEL 1.2f       // Base acceleration threshold (will be dynamically adjusted)
-#define FALL_CONFIRMATION_TIME 250      // Time in ms to confirm fall
-#define FALL_RESET_TIME 2000            // Time in ms before resetting fall detection
-#define STABLE_ANGLE_THRESHOLD 10.0f    // Max angle considered "stable" (not falling)
-#define ANGLE_RATE_THRESHOLD 3.5f       // Rate of change threshold for fall detection
+#define angQuedaPotencialMin 40.0f      // Ângulo mínimo para começar a detectar queda
+#define acelQuedaPotencialMin 1.2f      // Aceleração mínima para começar a detectar queda Base acceleration threshold (will be dynamically adjusted)
+#define tempoMinQuedaConfirm 2500        // Tempo mínimo em condição de queda para começar a considerar queda como true
+#define tempoResetQueda 2500            // Tempo que leva para resetar o queda true para queda false depois de voltar às condições de uma "não queda"
+#define anguloEstavel 10.0f             // ângulo máximo que a bicicleta pode variar de forma estável
+#define angPorLeitura 3.5f              // Quantidade máxima que o ângulo pode variar por ciclo sem detectar queda
+#define acelAdapt 0.005f                // Quanto leva para se adaptar a novas acelerações (menor = adapta mais devagar, maior = adapta mais rápido)
+#define acelNormalMax 0.8f              // Aceleração máxima que pode ser considerada normal, acima disso é considerado potencial queda
 
-// Dynamic baseline tracking parameters
-#define ACCEL_ADAPTATION_RATE 0.005f    // How quickly to adapt to new baseline (smaller = slower)
-#define MAX_BASELINE_ACCEL 0.8f         // Maximum value for baseline acceleration
+// valores para detecção de queda
+bool quedaDetectada = false;
+bool quedaConfirmada = false;
+unsigned long tempoInicioQueda = 0;
+unsigned long tempoConfirmQueda = 0;
 
-// Fall detection state variables
-bool fallDetected = false;
-bool fallConfirmed = false;
-unsigned long fallStartTime = 0;
-unsigned long fallConfirmTime = 0;
+float acelAtualFiltrada = 0.2f;     // guarda o valor atual de aceleração (vai ser alterada ao longo do tempo baseado com o "acelAdapt")
+bool sistemaCalibrado = false;  // Se a calibração terminou ou não
 
-// Dynamic baseline variables
-float baselineAccel = 0.2f;     // Starting baseline for acceleration (will adapt over time)
-bool systemCalibrated = false;  // Flag to indicate initial calibration is complete
 
+// cria objeto mpu e atribui namespace
 namespace nsMPU {
     MPU6050 mpu;
 }
 
 bool mpuInit()
 {
-    Serial.println("DEBUG: Starting MPU initialization");
+    Serial.println("DEBUG: INICIALIZANDO MPU");
 
-    // Initialize I2C
+    // Iniciando I2C
     #if I2CDEV_IMPLEMENTATION == I2CDEV_ARDUINO_WIRE
         Wire.begin(I2C_SDA, I2C_SCL); // Using ESP32 specific pins
         Wire.setClock(400000);
@@ -57,38 +55,38 @@ bool mpuInit()
         Serial.println("DEBUG: FastWire initialized");
     #endif
 
-    // Initialize MPU
-    Serial.println("DEBUG: Initializing MPU...");
+    // Iniciando MPU
+    Serial.println("DEBUG: Inicia MPU...");
     nsMPU::mpu.initialize();
 
-    // Test connection
-    Serial.println("DEBUG: Testing MPU connection...");
+    // verifica a conexão do MPU
+    Serial.println("DEBUG: Verificando conexão do MPU...");
     bool connected = nsMPU::mpu.testConnection();
     if (!connected) {
-        Serial.println("ERROR: MPU connection failed! Check wiring!");
+        Serial.println("ERROR: Conexão falhou! verifique os fios!");
         return false;
     }
-    Serial.println("DEBUG: MPU connection successful");
+    Serial.println("DEBUG: MPU conectado");
 
-    // Initialize DMP
-    Serial.println("DEBUG: Initializing DMP...");
+    // Iniciando DMP
+    Serial.println("DEBUG: Iniciando DMP...");
     uint8_t devStatus = nsMPU::mpu.dmpInitialize();
 
-    // Set offsets through calibration
-    Serial.println("DEBUG: Setting offsets...");
+    // Calibrando offsets
+    Serial.println("DEBUG: Calibrando offsets...");
     mpuCalibrateOffsets();
 
-    // Check DMP init status
+    // checagem do DMP
     if (devStatus == 0) {
-        Serial.println("DEBUG: DMP initialized successfully");
+        Serial.println("DEBUG: DMP iniciou corretamente");
 
         // Reset FIFO before enabling DMP
         nsMPU::mpu.resetFIFO();
         delay(100);
 
-        Serial.println("DEBUG: Enabling DMP...");
+        Serial.println("DEBUG: Habilitando DMP...");
         nsMPU::mpu.setDMPEnabled(true);
-        Serial.println("DEBUG: DMP enabled");
+        Serial.println("DEBUG: DMP Habilitado");
 
         // Reset FIFO again after enabling DMP
         nsMPU::mpu.resetFIFO();
@@ -103,32 +101,33 @@ bool mpuInit()
 }
 
 // Scales the measured angle to get a full 90 degrees
-float scaleAngle(float measuredAngle, float maxMeasured, float targetMax) {
-    // Determine if we're dealing with positive or negative angles
-    bool isNegative = (measuredAngle < 0);
-    float absAngle = abs(measuredAngle);
-    float absMaxMeasured = abs(maxMeasured);
-    float absTargetMax = abs(targetMax);
+float scaleAngle(float angMedido, float angMedidoMax, float angObjetivo) {
+    // Determina se é angulo positivo ou negativo
+    bool ehNegativo = (angMedido < 0);
 
-    // Apply scaling only if the angle is significant (> 5 degrees)
-    if (absAngle > 5.0f) {
-        // Proportional scaling
-        float scaledAngle = (absAngle / absMaxMeasured) * absTargetMax;
+    float angAbsoluto = abs(angMedido);
+    float angMedidoMaxAbsoluto = abs(angMedidoMax);
+    float angObjetivoAbsoluto = abs(angObjetivo);
 
-        // For very large angles, cap at maximum
-        if (absAngle > absMaxMeasured * 0.95f) {
-            scaledAngle = absTargetMax;
+    // So deixa proporcional se o ângulo for maior que 5 graus pois medidas muito pequenas a diferença não interfere
+    if (angAbsoluto > 5.0f) {
+        // Deixando angulo proporcional
+        float scaledAngle = (angAbsoluto / angMedidoMaxAbsoluto) * angObjetivoAbsoluto;
+
+        // Angulos Muito grandes ficam limitados a um valor máximo
+        if (angAbsoluto > angMedidoMaxAbsoluto * 0.95f) {
+            scaledAngle = angObjetivoAbsoluto;
         }
 
-        // Restore the sign
-        return isNegative ? -scaledAngle : scaledAngle;
+        // Coloca sinal de volta caso precise
+        return ehNegativo ? -scaledAngle : scaledAngle;
     }
 
     // For small angles, return as is
-    return measuredAngle;
+    return angMedido;
 }
 
-bool mpuGetYawPitchRoll(float& y, float& p, float& r, float& accelMagnitude)
+bool mpuGetYawPitchRoll(float& y, float& p, float& r, float& acelAtual)
 {
     uint8_t FIFOBuffer[64];
     Quaternion q;
@@ -147,42 +146,39 @@ bool mpuGetYawPitchRoll(float& y, float& p, float& r, float& accelMagnitude)
         return false;
     }
 
-    // Wait for correct packet size
+    // Espera FIFO ter valores suficientes
     if (fifoCount < 42) {
-        return false;  // Not enough data yet
+        return false;  // Sem data suficiente
     }
 
-    // Check if packet available
+    // Verifica se pacote FIFO está disponível
     if (nsMPU::mpu.dmpGetCurrentFIFOPacket(FIFOBuffer)) {
         // Get quaternion and gravity
         nsMPU::mpu.dmpGetQuaternion(&q, FIFOBuffer);
         nsMPU::mpu.dmpGetGravity(&gravity, &q);
 
-        // Calculate angles from gravity vector
+        // Calcula ângulos da gravidade
         float gx = gravity.x;
         float gy = gravity.y;
         float gz = gravity.z;
 
-        // Calculate roll and pitch
+        // Calcula pitch e roll
         r = atan2(gy, gz) * 180.0 / M_PI;
         p = atan2(-gx, sqrt(gy * gy + gz * gz)) * 180.0 / M_PI;
 
-        // For yaw, use the quaternion
-        y = atan2(2.0f * (q.w * q.z + q.x * q.y),
-                 1.0f - 2.0f * (q.y * q.y + q.z * q.z)) * 180.0f / M_PI;
+        // usa quaternio pra conseguir yaw
+        y = atan2(2.0f * (q.w * q.z + q.x * q.y), 1.0f - 2.0f * (q.y * q.y + q.z * q.z)) * 180.0f / M_PI;
 
-        // Scale angles to get full 90 degrees when rotated
+        // Deixa os ângulos de pitch e roll proporcionais a 90 graus, 83 é um valor arbitrário baseado em testes prévios
         p = scaleAngle(p, -83.0f, -90.0f);
         r = scaleAngle(r, 83.0f, 90.0f);
 
-        // Get acceleration data
+        // Pega valores da aceleração
         nsMPU::mpu.dmpGetAccel(&accel, FIFOBuffer);
         nsMPU::mpu.dmpGetLinearAccel(&accelReal, &accel, &gravity);
 
         // Calculate total acceleration magnitude (in g)
-        accelMagnitude = sqrt(accelReal.x*accelReal.x +
-                             accelReal.y*accelReal.y +
-                             accelReal.z*accelReal.z) / 16384.0f; // 16384 LSB/g for ±2g range
+        acelAtual = sqrt(accelReal.x*accelReal.x + accelReal.y*accelReal.y + accelReal.z*accelReal.z) / 16384.0f; // 16384 LSB/g for ±2g range
 
         return true;
     }
@@ -194,10 +190,10 @@ void mpuCalibrateOffsets() {
   int16_t ax, ay, az, gx, gy, gz;
   int32_t ax_sum, ay_sum, az_sum;
   int32_t gx_sum, gy_sum, gz_sum;
-  int num_readings = 100;
-  int num_iterations = 5;  // More iterations for better results
+  int qtdLeituras = 100; // Quantidade de leituras do MPU a cada calibração
+  int qtdInteracoes = 5; // Quantas vezes a calibração do MPU será feita
 
-  // Initial offsets
+  // Offsets iniciais
   int16_t gx_offset = 0;
   int16_t gy_offset = 0;
   int16_t gz_offset = 0;
@@ -205,74 +201,73 @@ void mpuCalibrateOffsets() {
   int16_t ay_offset = 0;
   int16_t az_offset = 0;
 
-  Serial.println("Enhanced MPU6050 calibration - keep PERFECTLY STILL on a FLAT surface");
+  Serial.println("Calibrando MPU - MANTENHA PARADO EM SUPERFíCIE LISA");
 
-  // First calibrate gyro (it's easier)
-  Serial.println("Step 1: Calibrating gyroscope...");
-  for (int iteration = 0; iteration < num_iterations; iteration++) {
+  // Calibra gyro
+  Serial.println("Calibranto gyroscope...");
+  for (int interacao = 0; interacao < qtdInteracoes; interacao++) {
     gx_sum = 0; gy_sum = 0; gz_sum = 0;
 
-    // Apply current offsets
+    // Pega os offsets dos eixos do gyro
     nsMPU::mpu.setXGyroOffset(gx_offset);
     nsMPU::mpu.setYGyroOffset(gy_offset);
     nsMPU::mpu.setZGyroOffset(gz_offset);
     delay(100);
 
-    // Take readings
-    for (int i = 0; i < num_readings; i++) {
+    // Faz leituras
+    for (int i = 0; i < qtdLeituras; i++) {
       nsMPU::mpu.getRotation(&gx, &gy, &gz);
       gx_sum += gx; gy_sum += gy; gz_sum += gz;
       delay(5);
     }
 
-    // Update offsets
-    gx_offset -= gx_sum / num_readings;
-    gy_offset -= gy_sum / num_readings;
-    gz_offset -= gz_sum / num_readings;
+    // Atualiza offsets por média aritmética a cada calibração
+    gx_offset -= gx_sum / qtdLeituras;
+    gy_offset -= gy_sum / qtdLeituras;
+    gz_offset -= gz_sum / qtdLeituras;
 
-    Serial.print("Gyro iteration ");
-    Serial.print(iteration + 1);
+    Serial.print("Gyro calibração ");
+    Serial.print(interacao + 1);
     Serial.print(": X=");
-    Serial.print(gx_sum / num_readings);
+    Serial.print(gx_sum / qtdLeituras);
     Serial.print(" Y=");
-    Serial.print(gy_sum / num_readings);
+    Serial.print(gy_sum / qtdLeituras);
     Serial.print(" Z=");
-    Serial.println(gz_sum / num_readings);
+    Serial.println(gz_sum / qtdLeituras);
   }
 
-  // Now calibrate accelerometer
-  Serial.println("Step 2: Calibrating accelerometer...");
-  for (int iteration = 0; iteration < num_iterations; iteration++) {
+  // Calibra acelerômetro
+  Serial.println("Calibrando acelerômetro...");
+  for (int interacao = 0; interacao < qtdInteracoes; interacao++) {
     ax_sum = 0; ay_sum = 0; az_sum = 0;
 
-    // Apply current offsets
+    // Pega offsets dos eixos do acelerômetro
     nsMPU::mpu.setXAccelOffset(ax_offset);
     nsMPU::mpu.setYAccelOffset(ay_offset);
     nsMPU::mpu.setZAccelOffset(az_offset);
     delay(100);
 
-    // Take readings
-    for (int i = 0; i < num_readings; i++) {
+    // Faz leituras
+    for (int i = 0; i < qtdLeituras; i++) {
       nsMPU::mpu.getAcceleration(&ax, &ay, &az);
       ax_sum += ax; ay_sum += ay; az_sum += az;
       delay(5);
     }
 
-    // Calculate averages
-    int16_t ax_avg = ax_sum / num_readings;
-    int16_t ay_avg = ay_sum / num_readings;
-    int16_t az_avg = az_sum / num_readings;
+    // Calcula médias
+    int16_t ax_avg = ax_sum / qtdLeituras;
+    int16_t ay_avg = ay_sum / qtdLeituras;
+    int16_t az_avg = az_sum / qtdLeituras;
 
-    // Update offsets - when level, we want ax=0, ay=0, az=16384 (1g)
-    ax_offset -= ax_avg / 8;  // Divide by 8 for more gradual adjustment
-    ay_offset -= ay_avg / 8;  // Divide by 8 for more gradual adjustment
+    // atualiza offsets a cada calibração
+    ax_offset -= ax_avg / 8;  // Divide por para suavizar as correções do acelerômetro para
+    ay_offset -= ay_avg / 8;  // se aproximar do valor ideal sem oscilações muito grandes
 
-    // Handle Z axis differently - it should equal 1g (16384)
-    int16_t az_ideal = 16384;
-    az_offset += (az_ideal - az_avg) / 8;  // Divide by 8 for more gradual adjustment
+    // por causa da gravidade, temos que somar 16384
+    az_offset += (16384 - az_avg) / 8;  // Divisão por 8 tem mesmo motivo que os outros offsets
 
-    Serial.print("Accel iteration ");
-    Serial.print(iteration + 1);
+    Serial.print("Acelerômetro Calibração ");
+    Serial.print(interacao + 1);
     Serial.print(": X=");
     Serial.print(ax_avg);
     Serial.print(" Y=");
@@ -307,63 +302,67 @@ void mpuCalibrateOffsets() {
   delay(200);
 }
 
-// Enhanced fall detection with dynamic baseline adjustment
-bool detectFall(float pitch, float roll, float accelMagnitude) {
-    static float maxAccel = 0;
-    static float maxAngle = 0;
-    static float previousAngle = 0;
+bool detectFall(float pitch, float roll, float acelAtual) {
+    static float acelMax = 0;
+    static float angMax = 0;
+    static float angAnterior = 0;
 
-    // Get maximum angle (from horizontal)
-    float currentAngle = max(abs(pitch), abs(roll));
+    // considera ângulo atual o maior ângulo entre pitch e roll
+    float angAtual = max(abs(pitch), abs(roll));
 
-    // Calculate the rate of angle change (degrees per loop iteration)
-    float angleChangeRate = currentAngle - previousAngle;
-    previousAngle = currentAngle;
+    // calcula a taxa de mudança do ângulo a cada medição
+    float taxaMudancaAng = angAtual - angAnterior;
+    angAnterior = angAtual;
 
-    // Update max values during fall detection
-    maxAccel = max(maxAccel, accelMagnitude);
-    maxAngle = max(maxAngle, currentAngle);
+    // atualiza os valores máximos para ângulo e aceleração durante queda
+    acelMax = max(acelMax, acelAtual);
+    angMax = max(angMax, angAtual);
 
-    // Dynamic baseline tracking during normal riding (not when a fall is suspected)
-    if (!fallDetected && currentAngle < 20.0f) {
-        // Update baseline acceleration only if current acceleration is not too high
-        if (accelMagnitude < MAX_BASELINE_ACCEL) {
-            baselineAccel = baselineAccel * (1.0f - ACCEL_ADAPTATION_RATE) +
-                           accelMagnitude * ACCEL_ADAPTATION_RATE;
+    // checagem se a bicicleta está em uma condição "sem risco de estar em possível queda"
+    if (!quedaDetectada && angAtual < 20.0f) {
+        // Atualiza a aceleração atual filtrada aos poucos a cada leitura
+        // (se acelAdapt = 0.005, então somente 0.5% da aceleração atual será
+        // levada em consideração para alterar a aceleração filtrada, e todo
+        // o resto será retirada da aceleração atual filtrada anterior)
+        if (acelAtual < acelNormalMax) {
+            acelAtualFiltrada = acelAtualFiltrada * (1.0f - acelAdapt) + acelAtual * acelAdapt;
         }
     }
 
-    // Calculate excess acceleration beyond the baseline
-    float excessAccel = accelMagnitude - baselineAccel;
+    // calcula a diferença entre a aceleração atual filtrada e aceleração que acabou de
+    // ser registrada no sensor para detectar se teve uma mudança brusca na aceleração e,
+    // assim, detectar possível queda
+    float acelBrusca = acelAtual - acelAtualFiltrada;
 
-    // Less frequent debug output to avoid flooding the serial monitor
-    static unsigned long lastDebugPrint = 0;
-    if (millis() - lastDebugPrint >= 500) {
-        Serial.print("DEBUG - Angle: "); Serial.print(currentAngle);
-        Serial.print(" | Accel: "); Serial.print(accelMagnitude, 4);
-        Serial.print(" | Baseline: "); Serial.print(baselineAccel, 4);
-        Serial.print(" | Excess: "); Serial.print(excessAccel, 4);
-        Serial.print(" | Rate: "); Serial.println(angleChangeRate);
-        lastDebugPrint = millis();
+    // printa valores de aceleração atingidos
+    static unsigned long ultimoStatus = 0;
+    if (millis() -  ultimoStatus >= 1000) {
+        Serial.print(" | Ang: "); Serial.print(angAtual);
+        Serial.print(" | Acel Sensor : "); Serial.print(acelAtual, 4);
+        Serial.print(" | Acel Filtro: "); Serial.print(acelAtualFiltrada, 4);
+        Serial.print(" | Acel Brusca: "); Serial.print(acelBrusca, 4);
+        Serial.print(" | Taxa Ang: "); Serial.println(taxaMudancaAng);
+        ultimoStatus = millis();
     }
 
     // First stage fall detection (potential fall)
-    if (!fallDetected) {
-        // MIXED LOGIC: Both simple cases and combined detection
-        // Detect fall if EITHER:
-        // 1. Very steep angle (> 60 degrees) - almost certainly a fall
-        // 2. Moderate angle (> 40) AND significant excess acceleration or rate
-        if (currentAngle > 60.0f ||
-            (currentAngle > FALL_THRESHOLD_ANGLE &&
-             (excessAccel > FALL_THRESHOLD_ACCEL || angleChangeRate > ANGLE_RATE_THRESHOLD))) {
+    if (!quedaDetectada) {
+        // Detecta queda se:
+        // 1. Ângulo muito inclinado (> 60°)
+        // 2. Ângulo moderado (> 40° = angQuedaPotencial) e mudança brusca na aceleração
+        //    (> 1.2 = acelQuedaPotencialMin) ou no ângulo (> 3.5 = angPorLeitura) entre
+        //    duas leituras seguidas do acelerômetro
+        if (angAtual > 60.0f ||
+            (angAtual > angQuedaPotencialMin &&
+             (acelBrusca > acelQuedaPotencialMin || taxaMudancaAng > angPorLeitura))) {
 
-            fallDetected = true;
-            fallStartTime = millis();
-            Serial.println("POTENTIAL FALL DETECTED!");
-            Serial.print("Angle: "); Serial.print(currentAngle);
-            Serial.print(" | Accel: "); Serial.print(accelMagnitude);
-            Serial.print(" | Excess: "); Serial.print(excessAccel);
-            Serial.print(" | Rate: "); Serial.println(angleChangeRate);
+            quedaDetectada = true;
+            tempoInicioQueda = millis();
+            Serial.println("POSSÍVEL QUEDA DETECTADA!");
+            Serial.print("Ang: "); Serial.print(angAtual);
+            Serial.print(" | Acel Sensor: "); Serial.print(acelAtual);
+            Serial.print(" | Acel Brusca: "); Serial.print(acelBrusca);
+            Serial.print(" | Taxa Ang: "); Serial.print(taxaMudancaAng);
 
             // Visual indication - uncomment when you add an LED
             // digitalWrite(LED_PIN, HIGH);
@@ -371,15 +370,15 @@ bool detectFall(float pitch, float roll, float accelMagnitude) {
             return false; // Not confirmed yet
         }
     }
-    // Second stage: confirm fall
-    else if (!fallConfirmed) {
-        // If we return to stable position quickly, it's not a fall
-        if (currentAngle < STABLE_ANGLE_THRESHOLD && (millis() - fallStartTime > 100)) {
-            // Reset fall detection
-            fallDetected = false;
-            maxAccel = 0;
-            maxAngle = 0;
-            Serial.println("FALSE ALARM - Returned to stable position");
+    // Confirmação da queda
+    else if (!quedaConfirmada && quedaDetectada) {
+        // Se retornar a posição estável rápido, não considera queda
+        if (angAtual < anguloEstavel && (millis() - tempoInicioQueda > 2000)) {
+            // Coloca valores como "não queda"
+            quedaDetectada = false;
+            acelMax = 0;
+            angMax = 0;
+            Serial.println("Alarme falso - voltou a uma posição estável");
 
             // Turn off visual indication - uncomment when you add an LED
             // digitalWrite(LED_PIN, LOW);
@@ -387,48 +386,49 @@ bool detectFall(float pitch, float roll, float accelMagnitude) {
             return false;
         }
 
-        // Confirm fall after confirmation duration
-        if (millis() - fallStartTime > FALL_CONFIRMATION_TIME) {
-            fallConfirmed = true;
-            fallConfirmTime = millis();
-            Serial.println("FALL CONFIRMED!");
-            Serial.print("Max Angle: "); Serial.print(maxAngle);
-            Serial.print(" | Max Accel: "); Serial.println(maxAccel);
+        // se não retornar a posição rápido (< 2500 ms = tempoMinQuedaConfirm), considera como queda confirmada
+        if (millis() - tempoInicioQueda > tempoMinQuedaConfirm) {
+            quedaConfirmada = true;
+            tempoConfirmQueda = millis();
+            Serial.println("QUEDA CONFIRMADA!");
+            Serial.print("Ang Max: "); Serial.print(angMax);
+            Serial.print(" | Acel Max: "); Serial.println(acelMax);
 
-            // Determine fall severity
-            String fallSeverity;
-            if (maxAngle > 70.0f && maxAccel > 2.0f) {
-                fallSeverity = "Severe";
-            } else if (maxAngle > 50.0f || maxAccel > 1.5f) {
-                fallSeverity = "Moderate";
+            // Determina Gravidade da queda
+            String quedaSituacao;
+            if (angMax > 70.0f && acelMax > 2.0f) {
+                quedaSituacao = "Grave";
+            } else if (angMax > 50.0f || acelMax > 1.5f) {
+                quedaSituacao = "Moderada";
             } else {
-                fallSeverity = "Minor";
+                quedaSituacao = "Baixa";
             }
-            Serial.print("Fall severity: ");
-            Serial.println(fallSeverity);
+            Serial.print("Situação da queda: ");
+            Serial.println(quedaSituacao);
 
             return true;
         }
     }
-    // Reset fall detection after reset duration
-    else if (millis() - fallConfirmTime > FALL_RESET_TIME) {
-        fallDetected = false;
-        fallConfirmed = false;
-        maxAccel = 0;
-        maxAngle = 0;
-        Serial.println("Fall detection reset");
+    // Reseta valores de queda se passarem (> 2500 ms) desde confirmação de queda
+    // e sensor voltou para posição estável
+    else if (millis() - tempoConfirmQueda > tempoResetQueda || angAtual < anguloEstavel) {
+        quedaDetectada = false;
+        quedaConfirmada = false;
+        acelMax = 0;
+        angMax = 0;
+        Serial.println("Resetando valores de queda");
 
         // Turn off visual indication - uncomment when you add an LED
         // digitalWrite(LED_PIN, LOW);
     }
 
-    return fallConfirmed;
+    return quedaConfirmada;
 }
 
 void setup() {
-    // Initialize serial
+    // Inicializando serial
     Serial.begin(115200);
-    delay(1000); // Give time for serial to initialize
+    delay(1000);
 
     // Initialize pins - uncomment when you add hardware
     // pinMode(LED_PIN, OUTPUT);
@@ -444,7 +444,7 @@ void setup() {
     Serial.println("Bicycle Fall Detection System");
     Serial.println("=======================");
 
-    // Initialize MPU
+    // Inicializando MPU
     if (!mpuInit()) {
         Serial.println("Failed to initialize MPU. Halting.");
         // Error pattern - uncomment when you add an LED
@@ -459,11 +459,11 @@ void setup() {
         }
     }
 
-    // Add a warm-up period
-    Serial.println("Warming up... Please wait.");
+    // Tempo de inicialização
+    Serial.println("Finalizando... Por favor Espere.");
     for (int i = 5; i > 0; i--) {
         Serial.print(i);
-        Serial.println(" seconds remaining...");
+        Serial.println(" Contagem regressiva...");
         delay(1000);
     }
 
@@ -472,46 +472,48 @@ void setup() {
     // delay(500);
     // digitalWrite(LED_PIN, LOW);
 
-    Serial.println("Setup complete. Fall detection active.");
+    Serial.println("Pronto. detecção de queda ativa.");
 }
 
 void loop() {
-    static unsigned long lastPrint = 0;
-    static unsigned long noDataCount = 0;
-    static unsigned long totalLoops = 0;
-    static float lastPitch = 0;
+    static unsigned long ultimoPrint = 0;
+    static unsigned long semDataContagem = 0;
+    static unsigned long loopsContagem = 0;
+    static float ultimoPitch = 0;
     static float lastRoll = 0;
 
-    float y = 0, p = 0, r = 0, accelMag = 0;
+    float y = 0, p = 0, r = 0, acelAtual = 0;
 
-    totalLoops++;
+    loopsContagem++;
 
-    // Get YPR values and acceleration
-    bool gotData = mpuGetYawPitchRoll(y, p, r, accelMag);
+    // pega valores de Yaw Pitch and Roll
+    bool gotData = mpuGetYawPitchRoll(y, p, r, acelAtual);
 
     if (gotData) {
-        // Apply the spike detection code for erroneous readings
-        if (abs(p - lastPitch) > 30) {
+        // Usa valor do Último Pitch que não teve mudança brusca
+        if (abs(p - ultimoPitch) > 30) {
             // Likely a transient spike, use the last good value
-            p = lastPitch;
+            p = ultimoPitch;
         }
 
+        // Usa valor do Último Roll que não teve mudança brusca
         if (abs(r - lastRoll) > 30) {
             r = lastRoll;
         }
 
-        // Store values for next comparison
-        lastPitch = p;
+        // Guarda valores de último pitch para próxima comparação
+        ultimoPitch = p;
         lastRoll = r;
 
-        // Then apply the low-pass filter to smooth the values
+        // Filtro que evita que surtos aleatórios na detecção façam grande alteração
+        // nas próximas medições do sensor
         filteredPitch = (p * filterFactor) + (filteredPitch * (1.0 - filterFactor));
         filteredRoll = (r * filterFactor) + (filteredRoll * (1.0 - filterFactor));
 
-        // Check for falls using filtered values for more stability
-        bool fall = detectFall(filteredPitch, filteredRoll, accelMag);
+        // Usa função de detectar quedas com valores filtrados para melhor precisão
+        bool fall = detectFall(filteredPitch, filteredRoll, acelAtual);
 
-        // Take action on fall detection
+        // Ação caso quedaConfirmada = true
         if (fall) {
             // Actions when fall is confirmed
             // Uncomment this section when you add a buzzer
@@ -523,8 +525,8 @@ void loop() {
             // activate an alarm, send SMS, etc.
         }
 
-        // Print values every 500ms or when fall detected
-        if (millis() - lastPrint >= 500 || fall) {
+        // Printa os valores a cada 1000 ms ou se quedaConfirmada = true
+        if (millis() - ultimoPrint >= 1000 || fall) {
             Serial.print("Y: ");
             Serial.print(y);
             Serial.print(" | P: ");
@@ -532,27 +534,29 @@ void loop() {
             Serial.print(" | R: ");
             Serial.print(filteredRoll);
             Serial.print(" | Accel: ");
-            Serial.print(accelMag);
+            Serial.print(acelAtual);
             Serial.print("g");
 
-            if (fallDetected && !fallConfirmed) {
-                Serial.print(" | POTENTIAL FALL");
-            } else if (fallConfirmed) {
-                Serial.print(" | FALL CONFIRMED");
+            if (quedaDetectada && !quedaConfirmada) {
+                Serial.print(" | POSSIVEL QUEDA");
+                Serial.println();
+            } else if (quedaConfirmada) {
+                Serial.print(" | QUEDA CONFIRMADA");
+                Serial.println();
             }
 
-            Serial.println();
-            lastPrint = millis();
+            Serial.print(" ");
+            ultimoPrint = millis();
         }
     } else {
-        noDataCount++;
+        semDataContagem++;
 
         // Only print "no data" message occasionally
-        if (millis() - lastPrint >= 2000) {
+        if (millis() - ultimoPrint >= 2000) {
             Serial.print("No data available (");
-            Serial.print((float)noDataCount / totalLoops * 100.0);
+            Serial.print((float)semDataContagem / loopsContagem * 100.0);
             Serial.println("% of readings failed)");
-            lastPrint = millis();
+            ultimoPrint = millis();
         }
     }
 
