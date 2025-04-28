@@ -13,6 +13,7 @@ const char* password = ""; //senha da rede
 
 TinyGPSPlus gps;
 HardwareSerial gpsSerial(2);  // UART2 do ESP32
+GPSHandler gpsHandler(gps, gpsSerial, 1000);  // Instância do handler de GPS
 
 // Uncomment these when you add the hardware
 // #define BUZZER_PIN 5    // Pin for connecting a buzzer or alarm
@@ -34,7 +35,6 @@ float filtroPorcentagem = 0.1;
 
 #define I2C_SDA 21
 #define I2C_SCL 22
-
 bool quedaDetectada = false;
 bool quedaConfirmada = false;
 unsigned long tempoInicioQueda = 0;
@@ -42,16 +42,17 @@ unsigned long tempoConfirmQueda = 0;
 bool queda = false;
 
 float acelAtualFiltrada = 0.2f;
-bool sistemaCalibrado = false; 
+bool sistemaCalibrado = false;
 
 namespace nsMPU {
     MPU6050 mpu;
 }
 
+
 // Definindo os pinos do UART2 do ESP32
 #define GPS_RX 16  // RX2 (GPIO16)
 #define GPS_TX 17  // TX2 (GPIO17)
-#define GPS_Serial_Baud 115200
+#define GPS_Serial_Baud 9600
 
 bool mpuInit()
 {
@@ -377,15 +378,21 @@ void loop() {
         queda = detectaQueda(pitchFiltrado, rollFiltrado, acelAtual);
 
         if (queda) {
-            
-            locData gpsData = getGPS(gps, gpsSerial);
+            Serial.print('_');
+            locData gpsData = gpsHandler.getGPS();
+              if (gpsData.latitude != 0.0 && gpsData.longitude != 0.0) {
+                Serial.print("Latitude: ");
+                Serial.print(gpsData.latitude, 6);
+                Serial.print(" | Longitude: ");
+                Serial.println(gpsData.longitude, 6);
+                sendMessageClient(gpsData.latitude, gpsData.longitude, queda);
+              }
 
             // Actions when fall is confirmed
             // Uncomment this section when you add a buzzer
             // digitalWrite(BUZZER_PIN, HIGH);
             // delay(1000);
             // digitalWrite(BUZZER_PIN, LOW);
-            sendMessageClient(gpsData.latitude, gpsData.longitude, queda);
             // Additional code could be added here to send an alert,
             // activate an alarm, send SMS, etc.
         }
