@@ -4,7 +4,6 @@ Traffic Real-time Accident Crash Kit for Emergency Response (TRACKER) is a embed
 
 ## Technologies
 We built this project using ESP32 using the following modules:
-- GSM GPRS SIM800L
 - Ublox NEO-6MV2
 - MPU-6050
 
