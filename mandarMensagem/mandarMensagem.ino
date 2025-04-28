@@ -14,8 +14,9 @@ const char* ssid = ""; //nome da rede
 const char* password = ""; //senha da rede
 
 //função para envio da mensagem através do bot do telegram
-void sendMessageClient(float localizacao, bool queda){
+void sendMessageClient(double latitude, double longitude, bool queda){
   if (queda){ //caso haja queda, a repetição abaixo é acionada
+    String localizacao += "Latitude: " + latitude + "Longitude: " + longitude;
     enviarMensagem = 1;
 
     while (enviarMensagem){ 
@@ -49,8 +50,4 @@ void setup() {
   }
 
   Serial.println(WiFi.localIP());
-}
-
-void loop() {
-  sendMessageClient(localizacao, queda); //chamada da função
 }
