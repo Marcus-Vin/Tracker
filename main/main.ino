@@ -391,8 +391,8 @@ void loop() {
                     Serial.print(" | Longitude: ");
                     Serial.println(gpsData.longitude, 6);
                     sendMessageClient(gpsData.latitude, gpsData.longitude, queda);
-                    break; 
                 }
+                break; 
             }
             
 
@@ -422,7 +422,6 @@ void loop() {
             } else if (quedaConfirmada) {
                 Serial.print(" | QUEDA CONFIRMADA");
                 Serial.println();
-                sendMessageClient(1.34234, 2.89273, queda);
             }
 
             Serial.print(" ");
