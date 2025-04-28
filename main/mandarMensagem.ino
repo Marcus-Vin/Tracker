@@ -6,8 +6,8 @@
 #ifndef SENDMSG_INO
 #define SENDMSG_INO
 
-#define BOT_TOKEN "" //token do bot
-#define CHAT_ID "" //id do user
+#define BOT_TOKEN "7640736361:AAGRWd36iBlhZHl4EbgCm_566Bn8EPaV9Do" //token do bot
+#define CHAT_ID "6103199211" //id do user
 
 bool enviarMensagem = 1;
 WiFiClientSecure client;
