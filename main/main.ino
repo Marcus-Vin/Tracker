@@ -330,7 +330,10 @@ void setup() {
     WiFi.mode(WIFI_STA);
     WiFi.begin(ssid, password);
     client.setCACert(TELEGRAM_CERTIFICATE_ROOT);
-
+    while (WiFi.status() != WL_CONNECTED) {
+        delay(10000);
+        Serial.println("conectando ao wifi..");
+    }
     delay(1000);
 
     if (!mpuInit()) {
@@ -378,15 +381,20 @@ void loop() {
         queda = detectaQueda(pitchFiltrado, rollFiltrado, acelAtual);
 
         if (queda) {
-            Serial.print('_');
-            locData gpsData = gpsHandler.getGPS();
-              if (gpsData.latitude != 0.0 && gpsData.longitude != 0.0) {
-                Serial.print("Latitude: ");
-                Serial.print(gpsData.latitude, 6);
-                Serial.print(" | Longitude: ");
-                Serial.println(gpsData.longitude, 6);
-                sendMessageClient(gpsData.latitude, gpsData.longitude, queda);
-              }
+            Serial.print("______________________________________________");
+            
+            while (1){
+                locData gpsData = gpsHandler.getGPS();
+                if (gpsData.latitude != 0.0 && gpsData.longitude != 0.0) {
+                    Serial.print("Latitude: ");
+                    Serial.print(gpsData.latitude, 6);
+                    Serial.print(" | Longitude: ");
+                    Serial.println(gpsData.longitude, 6);
+                    sendMessageClient(gpsData.latitude, gpsData.longitude, queda);
+                    break; 
+                }
+            }
+            
 
             // Actions when fall is confirmed
             // Uncomment this section when you add a buzzer
@@ -414,6 +422,7 @@ void loop() {
             } else if (quedaConfirmada) {
                 Serial.print(" | QUEDA CONFIRMADA");
                 Serial.println();
+                sendMessageClient(1.34234, 2.89273, queda);
             }
 
             Serial.print(" ");
