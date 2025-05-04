@@ -8,8 +8,8 @@
 // #include "mesh.ino"
 #include "getGPS.ino"
 
-const char* ssid = "kaua"; //nome da rede
-const char* password = "amoremilly"; //senha da rede
+const char* ssid = ""; //nome da rede
+const char* password = ""; //senha da rede
 
 TinyGPSPlus gps;
 HardwareSerial gpsSerial(2);  // UART2 do ESP32
@@ -431,4 +431,6 @@ void loop() {
 
     delay(10);
 }
+  
+
   
